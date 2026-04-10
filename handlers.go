@@ -6,13 +6,13 @@ import (
 	"github.com/gorilla/mux"
 )
 
-// GET /checkins - Returns all records [cite: 7]
+// GET /checkins - Returns all records
 func GetCheckins(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(checkins)
 }
 
-// POST /checkins - Adds a new record [cite: 7, 31]
+// POST /checkins - Adds a new record
 func CreateCheckin(w http.ResponseWriter, r *http.Request) {
 	var newCheckin Checkin
 	_ = json.NewDecoder(r.Body).Decode(&newCheckin) // Turn JSON into Go struct
@@ -22,7 +22,7 @@ func CreateCheckin(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(newCheckin)
 }
 
-// PATCH /checkins/{id} - Updates a record [cite: 7, 32]
+// PATCH /checkins/{id} - Updates a record
 func PatchCheckin(w http.ResponseWriter, r *http.Request) {
 	params := mux.Vars(r) // Get the {id} from URL
 	for index, item := range checkins {
@@ -39,7 +39,7 @@ func PatchCheckin(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// DELETE /checkins/{id} - Removes a record [cite: 7, 33]
+// DELETE /checkins/{id} - Removes a record
 func DeleteCheckin(w http.ResponseWriter, r *http.Request) {
 	params := mux.Vars(r)
 	for index, item := range checkins {
