@@ -2,15 +2,17 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
+
 	"github.com/gorilla/mux"
 )
 
 // ---- Helper: write a JSON error response ----
-// This is a small reusable function so we don't repeat ourselves.
-// Every error in this API has the same shape: {"error": "...", "message": "..."}
 func writeError(w http.ResponseWriter, statusCode int, errType string, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
@@ -20,229 +22,282 @@ func writeError(w http.ResponseWriter, statusCode int, errType string, message s
 	})
 }
 
-// ---- Helper: validate a Checkin struct ----
-// Returns an error message string, or "" if everything is fine.
-// We call this inside POST and PATCH before saving anything.
+// ---- Valid enum maps (used in validation + query checks) ----
+var validTracks = map[string]bool{
+	"Backend": true, "Frontend": true,
+	"Product Design": true, "Product Management": true, "Growth": true,
+}
+var validStatuses = map[string]bool{
+	"pending": true, "submitted": true, "reviewed": true,
+}
+
+// ---- Helper: validate a Checkin struct before write ----
 func validateCheckin(c Checkin) string {
-	// learner_name must not be empty or just spaces
 	if strings.TrimSpace(c.LearnerName) == "" {
 		return "learner_name is required and cannot be empty"
-	}
-
-	// track must be one of the allowed values
-	validTracks := map[string]bool{
-		"Backend": true, "Frontend": true,
-		"Product Design": true, "Product Management": true, "Growth": true,
 	}
 	if !validTracks[c.Track] {
 		return "track must be one of: Backend, Frontend, Product Design, Product Management, Growth"
 	}
-
-	// status must be one of the allowed values
-	validStatuses := map[string]bool{
-		"pending": true, "submitted": true, "reviewed": true,
-	}
 	if !validStatuses[c.Status] {
 		return "status must be one of: pending, submitted, reviewed"
 	}
-
-	// submitted_at must not be empty
 	if strings.TrimSpace(c.SubmittedAt) == "" {
 		return "submitted_at is required"
 	}
-
-	return "" // empty string = no error
+	return ""
 }
 
 // ---- GET /checkins ----
-// Returns all records. Also supports:
-//   ?track=Backend       → filter by track
-//   ?status=submitted    → filter by status
-//   ?sort=submitted_at   → sort ascending by submitted_at
+// Supports: ?track=Backend  ?status=pending  ?sort=submitted_at  ?page=1&limit=5
 func GetCheckins(w http.ResponseWriter, r *http.Request) {
-	// Read query parameters from the URL
-	trackFilter := r.URL.Query().Get("track")
+	trackFilter  := r.URL.Query().Get("track")
 	statusFilter := r.URL.Query().Get("status")
-	sortParam := r.URL.Query().Get("sort")
+	sortParam    := r.URL.Query().Get("sort")
+	pageStr      := r.URL.Query().Get("page")
+	limitStr     := r.URL.Query().Get("limit")
 
-	// Validate query values if provided
-	if trackFilter != "" {
-		validTracks := map[string]bool{
-			"Backend": true, "Frontend": true,
-			"Product Design": true, "Product Management": true, "Growth": true,
-		}
-		if !validTracks[trackFilter] {
-			writeError(w, http.StatusBadRequest, "invalid_query", "track must be one of: Backend, Frontend, Product Design, Product Management, Growth")
-			return
-		}
+	// Validate filters
+	if trackFilter != "" && !validTracks[trackFilter] {
+		writeError(w, http.StatusBadRequest, "invalid_query", "track must be one of: Backend, Frontend, Product Design, Product Management, Growth")
+		return
 	}
-	if statusFilter != "" {
-		validStatuses := map[string]bool{
-			"pending": true, "submitted": true, "reviewed": true,
-		}
-		if !validStatuses[statusFilter] {
-			writeError(w, http.StatusBadRequest, "invalid_query", "status must be one of: pending, submitted, reviewed")
-			return
-		}
+	if statusFilter != "" && !validStatuses[statusFilter] {
+		writeError(w, http.StatusBadRequest, "invalid_query", "status must be one of: pending, submitted, reviewed")
+		return
 	}
-
-	// Start with all checkins, then filter down
-	result := []Checkin{}
-	for _, item := range checkins {
-		// Skip this item if it doesn't match the filter
-		if trackFilter != "" && item.Track != trackFilter {
-			continue
-		}
-		if statusFilter != "" && item.Status != statusFilter {
-			continue
-		}
-		result = append(result, item)
-	}
-
-	// Sort if requested
-	// We only support sort=submitted_at (ascending)
-	if sortParam == "submitted_at" {
-		sort.Slice(result, func(i, j int) bool {
-			return result[i].SubmittedAt < result[j].SubmittedAt
-		})
-	} else if sortParam != "" {
-		// Unknown sort field
+	if sortParam != "" && sortParam != "submitted_at" {
 		writeError(w, http.StatusBadRequest, "invalid_query", "sort only supports: submitted_at")
 		return
 	}
+
+	// Pagination defaults
+	page, limit := 1, 10
+	if pageStr != "" {
+		if v, err := strconv.Atoi(pageStr); err == nil && v > 0 {
+			page = v
+		}
+	}
+	if limitStr != "" {
+		if v, err := strconv.Atoi(limitStr); err == nil && v > 0 && v <= 100 {
+			limit = v
+		}
+	}
+	offset := (page - 1) * limit
+
+	// Build the SQL query dynamically based on filters
+	// We JOIN tracks so the response shows the track name, not the internal ID
+	query := `
+		SELECT c.id, c.learner_name, t.name AS track, c.status,
+		       c.submitted_at, c.created_at, c.updated_at
+		FROM checkins c
+		JOIN tracks t ON c.track_id = t.id
+		WHERE 1=1`
+	args := []interface{}{}
+	argIdx := 1
+
+	if trackFilter != "" {
+		query += fmt.Sprintf(" AND t.name = $%d", argIdx)
+		args = append(args, trackFilter)
+		argIdx++
+	}
+	if statusFilter != "" {
+		query += fmt.Sprintf(" AND c.status = $%d", argIdx)
+		args = append(args, statusFilter)
+		argIdx++
+	}
+
+	// Sort
+	if sortParam == "submitted_at" {
+		query += " ORDER BY c.submitted_at ASC"
+	} else {
+		query += " ORDER BY c.created_at DESC"
+	}
+
+	// Pagination
+	query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
+	args = append(args, limit, offset)
+
+	rows, err := DB.Query(query, args...)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db_error", "failed to query checkins")
+		return
+	}
+	defer rows.Close()
+
+	result := []Checkin{}
+	for rows.Next() {
+		var c Checkin
+		if err := rows.Scan(&c.ID, &c.LearnerName, &c.Track, &c.Status,
+			&c.SubmittedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			writeError(w, http.StatusInternalServerError, "db_error", "failed to read checkins")
+			return
+		}
+		result = append(result, c)
+	}
+
+	// Sort in-memory only needed when DB sort isn't enough (already handled above)
+	_ = sort.Slice // imported, used to avoid unused import error
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
 }
 
 // ---- GET /checkins/{id} ----
-// Returns a single record by ID, or 404 if not found.
 func GetCheckinByID(w http.ResponseWriter, r *http.Request) {
-	params := mux.Vars(r)
-	id := params["id"]
+	id := mux.Vars(r)["id"]
 
-	// id must not be empty (mux won't even match if it's missing, but just in case)
 	if strings.TrimSpace(id) == "" {
 		writeError(w, http.StatusBadRequest, "invalid_id", "id cannot be empty")
 		return
 	}
 
-	for _, item := range checkins {
-		if item.ID == id {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(item)
-			return
-		}
+	var c Checkin
+	err := DB.QueryRow(`
+		SELECT c.id, c.learner_name, t.name, c.status,
+		       c.submitted_at, c.created_at, c.updated_at
+		FROM checkins c
+		JOIN tracks t ON c.track_id = t.id
+		WHERE c.id = $1`, id).
+		Scan(&c.ID, &c.LearnerName, &c.Track, &c.Status,
+			&c.SubmittedAt, &c.CreatedAt, &c.UpdatedAt)
+
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "no checkin found with id "+id)
+		return
 	}
 
-	// If we got here, nothing matched
-	writeError(w, http.StatusNotFound, "not_found", "no checkin found with id "+id)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(c)
 }
 
 // ---- POST /checkins ----
-// Creates a new checkin after validating the request body.
 func CreateCheckin(w http.ResponseWriter, r *http.Request) {
 	var newCheckin Checkin
-
-	// Try to decode the JSON body
 	if err := json.NewDecoder(r.Body).Decode(&newCheckin); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_body", "request body must be valid JSON")
 		return
 	}
 
-	// Validate all fields
 	if errMsg := validateCheckin(newCheckin); errMsg != "" {
 		writeError(w, http.StatusBadRequest, "validation_error", errMsg)
 		return
 	}
 
-	// Check that the ID isn't already taken
-	for _, item := range checkins {
-		if item.ID == newCheckin.ID {
+	// Look up the track_id from the tracks table
+	var trackID int
+	err := DB.QueryRow(`SELECT id FROM tracks WHERE name = $1`, newCheckin.Track).Scan(&trackID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_track", "track not found: "+newCheckin.Track)
+		return
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	_, err = DB.Exec(`
+		INSERT INTO checkins (id, learner_name, track_id, status, submitted_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		newCheckin.ID, newCheckin.LearnerName, trackID,
+		newCheckin.Status, newCheckin.SubmittedAt, now, now)
+
+	if err != nil {
+		// Postgres error code 23505 = unique_violation (duplicate ID)
+		if strings.Contains(err.Error(), "duplicate key") {
 			writeError(w, http.StatusBadRequest, "duplicate_id", "a checkin with id "+newCheckin.ID+" already exists")
 			return
 		}
+		writeError(w, http.StatusInternalServerError, "db_error", "failed to create checkin")
+		return
 	}
 
-	checkins = append(checkins, newCheckin)
+	newCheckin.CreatedAt = now
+	newCheckin.UpdatedAt = now
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated) // 201 Created is more correct than 200 for POST
+	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(newCheckin)
 }
 
 // ---- PATCH /checkins/{id} ----
-// Partially updates a checkin. Only fields sent in the body are changed.
 func PatchCheckin(w http.ResponseWriter, r *http.Request) {
-	params := mux.Vars(r)
-	id := params["id"]
+	id := mux.Vars(r)["id"]
 
-	// Find the checkin first
-	for index, item := range checkins {
-		if item.ID == id {
-			// Decode what the client sent
-			var updatedData Checkin
-			if err := json.NewDecoder(r.Body).Decode(&updatedData); err != nil {
-				writeError(w, http.StatusBadRequest, "invalid_body", "request body must be valid JSON")
-				return
-			}
-
-			// Only update fields that were actually sent (non-empty)
-			// This is what "partial update" means — untouched fields stay as-is
-			if strings.TrimSpace(updatedData.LearnerName) != "" {
-				checkins[index].LearnerName = updatedData.LearnerName
-			}
-			if strings.TrimSpace(updatedData.Track) != "" {
-				// Validate before applying
-				validTracks := map[string]bool{
-					"Backend": true, "Frontend": true,
-					"Product Design": true, "Product Management": true, "Growth": true,
-				}
-				if !validTracks[updatedData.Track] {
-					writeError(w, http.StatusBadRequest, "validation_error", "track must be one of: Backend, Frontend, Product Design, Product Management, Growth")
-					return
-				}
-				checkins[index].Track = updatedData.Track
-			}
-			if strings.TrimSpace(updatedData.Status) != "" {
-				// Validate before applying
-				validStatuses := map[string]bool{
-					"pending": true, "submitted": true, "reviewed": true,
-				}
-				if !validStatuses[updatedData.Status] {
-					writeError(w, http.StatusBadRequest, "validation_error", "status must be one of: pending, submitted, reviewed")
-					return
-				}
-				checkins[index].Status = updatedData.Status
-			}
-			if strings.TrimSpace(updatedData.SubmittedAt) != "" {
-				checkins[index].SubmittedAt = updatedData.SubmittedAt
-			}
-
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(checkins[index])
-			return
-		}
+	// Check the record exists first
+	var existing Checkin
+	var trackID int
+	err := DB.QueryRow(`
+		SELECT c.id, c.learner_name, t.name, t.id, c.status, c.submitted_at
+		FROM checkins c JOIN tracks t ON c.track_id = t.id
+		WHERE c.id = $1`, id).
+		Scan(&existing.ID, &existing.LearnerName, &existing.Track, &trackID,
+			&existing.Status, &existing.SubmittedAt)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "no checkin found with id "+id)
+		return
 	}
 
-	// Nothing matched
-	writeError(w, http.StatusNotFound, "not_found", "no checkin found with id "+id)
+	var patch Checkin
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "request body must be valid JSON")
+		return
+	}
+
+	// Merge: only overwrite fields that were sent
+	if strings.TrimSpace(patch.LearnerName) != "" {
+		existing.LearnerName = patch.LearnerName
+	}
+	if strings.TrimSpace(patch.Track) != "" {
+		if !validTracks[patch.Track] {
+			writeError(w, http.StatusBadRequest, "validation_error", "track must be one of: Backend, Frontend, Product Design, Product Management, Growth")
+			return
+		}
+		existing.Track = patch.Track
+		// Re-resolve the track_id
+		DB.QueryRow(`SELECT id FROM tracks WHERE name = $1`, existing.Track).Scan(&trackID)
+	}
+	if strings.TrimSpace(patch.Status) != "" {
+		if !validStatuses[patch.Status] {
+			writeError(w, http.StatusBadRequest, "validation_error", "status must be one of: pending, submitted, reviewed")
+			return
+		}
+		existing.Status = patch.Status
+	}
+	if strings.TrimSpace(patch.SubmittedAt) != "" {
+		existing.SubmittedAt = patch.SubmittedAt
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	_, err = DB.Exec(`
+		UPDATE checkins
+		SET learner_name=$1, track_id=$2, status=$3, submitted_at=$4, updated_at=$5
+		WHERE id=$6`,
+		existing.LearnerName, trackID, existing.Status, existing.SubmittedAt, now, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db_error", "failed to update checkin")
+		return
+	}
+
+	existing.UpdatedAt = now
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(existing)
 }
 
 // ---- DELETE /checkins/{id} ----
-// Removes a record, or returns 404 if it doesn't exist.
 func DeleteCheckin(w http.ResponseWriter, r *http.Request) {
-	params := mux.Vars(r)
-	id := params["id"]
+	id := mux.Vars(r)["id"]
 
-	for index, item := range checkins {
-		if item.ID == id {
-			// Remove by splicing the slice
-			checkins = append(checkins[:index], checkins[index+1:]...)
-			w.WriteHeader(http.StatusNoContent) // 204 = success, no body
-			return
-		}
+	result, err := DB.Exec(`DELETE FROM checkins WHERE id = $1`, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db_error", "failed to delete checkin")
+		return
 	}
 
-	writeError(w, http.StatusNotFound, "not_found", "no checkin found with id "+id)
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		writeError(w, http.StatusNotFound, "not_found", "no checkin found with id "+id)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
