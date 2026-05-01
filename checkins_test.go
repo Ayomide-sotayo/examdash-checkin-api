@@ -42,22 +42,33 @@ func seedTestData(t *testing.T) {
 	DB.Exec(`DELETE FROM tracks`)
 	DB.Exec(`INSERT INTO tracks (name) VALUES ('Backend'),('Frontend'),('Product Design'),('Product Management'),('Growth') ON CONFLICT DO NOTHING`)
 	DB.Exec(`
-		INSERT INTO checkins (id, learner_name, track_id, status, submitted_at, created_at, updated_at)
-		SELECT '1','User One', t.id, 'submitted', $1, NOW(), NOW() FROM tracks t WHERE t.name='Backend'`,
+		INSERT INTO checkins (learner_name, track_id, status, submitted_at, created_at, updated_at)
+		SELECT 'User One', t.id, 'submitted', $1, NOW(), NOW() FROM tracks t WHERE t.name='Backend'`,
 		time.Now().Format(time.RFC3339))
 	DB.Exec(`
-		INSERT INTO checkins (id, learner_name, track_id, status, submitted_at, created_at, updated_at)
-		SELECT '2','User Two', t.id, 'pending', $1, NOW(), NOW() FROM tracks t WHERE t.name='Frontend'`,
+		INSERT INTO checkins (learner_name, track_id, status, submitted_at, created_at, updated_at)
+		SELECT 'User Two', t.id, 'pending', $1, NOW(), NOW() FROM tracks t WHERE t.name='Frontend'`,
 		time.Now().Format(time.RFC3339))
 	DB.Exec(`
-		INSERT INTO checkins (id, learner_name, track_id, status, submitted_at, created_at, updated_at)
-		SELECT '3','User Three', t.id, 'reviewed', $1, NOW(), NOW() FROM tracks t WHERE t.name='Product Design'`,
+		INSERT INTO checkins (learner_name, track_id, status, submitted_at, created_at, updated_at)
+		SELECT 'User Three', t.id, 'reviewed', $1, NOW(), NOW() FROM tracks t WHERE t.name='Product Design'`,
 		time.Now().Format(time.RFC3339))
 }
 
 // setMuxVars injects URL path vars for direct handler testing.
 func setMuxVars(r *http.Request, vars map[string]string) *http.Request {
 	return mux.SetURLVars(r, vars)
+}
+
+// getFirstCheckinID is a helper to grab the first checkin id from the DB
+func getFirstCheckinID(t *testing.T) int {
+	t.Helper()
+	var id int
+	err := DB.QueryRow(`SELECT id FROM checkins ORDER BY id ASC LIMIT 1`).Scan(&id)
+	if err != nil {
+		t.Fatalf("could not get first checkin id: %v", err)
+	}
+	return id
 }
 
 // --- Test 1: GET /checkins returns all records ---
@@ -84,9 +95,11 @@ func TestCreateCheckin(t *testing.T) {
 	setupTestDB(t)
 	seedTestData(t)
 
+	// No id field — Postgres generates it automatically
 	newItem := Checkin{
-		ID: "4", LearnerName: "Test Learner",
-		Track: "Backend", Status: "pending",
+		LearnerName: "Test Learner",
+		Track:       "Backend",
+		Status:      "pending",
 		SubmittedAt: time.Now().Format(time.RFC3339),
 	}
 	body, _ := json.Marshal(newItem)
@@ -98,11 +111,11 @@ func TestCreateCheckin(t *testing.T) {
 		t.Errorf("expected 201, got %d — body: %s", rr.Code, rr.Body.String())
 	}
 
-	// Verify it's actually in the DB
-	var count int
-	DB.QueryRow(`SELECT COUNT(*) FROM checkins WHERE id = '4'`).Scan(&count)
-	if count != 1 {
-		t.Error("new checkin was not persisted to the database")
+	// Verify the returned checkin has an auto-generated id > 0
+	var created Checkin
+	json.NewDecoder(rr.Body).Decode(&created)
+	if created.ID == 0 {
+		t.Error("expected auto-generated id > 0, got 0")
 	}
 }
 
@@ -112,8 +125,9 @@ func TestCreateCheckin_ValidationError(t *testing.T) {
 	seedTestData(t)
 
 	badItem := Checkin{
-		ID: "5", LearnerName: "", // INVALID
-		Track: "Backend", Status: "pending",
+		LearnerName: "", // INVALID
+		Track:       "Backend",
+		Status:      "pending",
 		SubmittedAt: time.Now().Format(time.RFC3339),
 	}
 	body, _ := json.Marshal(badItem)
@@ -158,8 +172,8 @@ func TestDeleteCheckin_NotFound(t *testing.T) {
 	setupTestDB(t)
 	seedTestData(t)
 
-	req := httptest.NewRequest("DELETE", "/checkins/999", nil)
-	req = setMuxVars(req, map[string]string{"id": "999"})
+	req := httptest.NewRequest("DELETE", "/checkins/999999", nil)
+	req = setMuxVars(req, map[string]string{"id": "999999"})
 	rr := httptest.NewRecorder()
 	DeleteCheckin(rr, req)
 

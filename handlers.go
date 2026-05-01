@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -86,7 +85,6 @@ func GetCheckins(w http.ResponseWriter, r *http.Request) {
 	offset := (page - 1) * limit
 
 	// Build the SQL query dynamically based on filters
-	// We JOIN tracks so the response shows the track name, not the internal ID
 	query := `
 		SELECT c.id, c.learner_name, t.name AS track, c.status,
 		       c.submitted_at, c.created_at, c.updated_at
@@ -136,24 +134,23 @@ func GetCheckins(w http.ResponseWriter, r *http.Request) {
 		result = append(result, c)
 	}
 
-	// Sort in-memory only needed when DB sort isn't enough (already handled above)
-	_ = sort.Slice // imported, used to avoid unused import error
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
 }
 
 // ---- GET /checkins/{id} ----
 func GetCheckinByID(w http.ResponseWriter, r *http.Request) {
-	id := mux.Vars(r)["id"]
+	idStr := mux.Vars(r)["id"]
 
-	if strings.TrimSpace(id) == "" {
-		writeError(w, http.StatusBadRequest, "invalid_id", "id cannot be empty")
+	// id must be a valid integer now
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", "id must be a number")
 		return
 	}
 
 	var c Checkin
-	err := DB.QueryRow(`
+	err = DB.QueryRow(`
 		SELECT c.id, c.learner_name, t.name, c.status,
 		       c.submitted_at, c.created_at, c.updated_at
 		FROM checkins c
@@ -163,7 +160,7 @@ func GetCheckinByID(w http.ResponseWriter, r *http.Request) {
 			&c.SubmittedAt, &c.CreatedAt, &c.UpdatedAt)
 
 	if err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "no checkin found with id "+id)
+		writeError(w, http.StatusNotFound, "not_found", fmt.Sprintf("no checkin found with id %d", id))
 		return
 	}
 
@@ -172,6 +169,7 @@ func GetCheckinByID(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- POST /checkins ----
+// Caller does NOT send an id — Postgres generates it automatically
 func CreateCheckin(w http.ResponseWriter, r *http.Request) {
 	var newCheckin Checkin
 	if err := json.NewDecoder(r.Body).Decode(&newCheckin); err != nil {
@@ -194,18 +192,15 @@ func CreateCheckin(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	_, err = DB.Exec(`
-		INSERT INTO checkins (id, learner_name, track_id, status, submitted_at, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		newCheckin.ID, newCheckin.LearnerName, trackID,
-		newCheckin.Status, newCheckin.SubmittedAt, now, now)
+	// Use RETURNING id to get the auto-generated id back
+	err = DB.QueryRow(`
+		INSERT INTO checkins (learner_name, track_id, status, submitted_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id`,
+		newCheckin.LearnerName, trackID,
+		newCheckin.Status, newCheckin.SubmittedAt, now, now).Scan(&newCheckin.ID)
 
 	if err != nil {
-		// Postgres error code 23505 = unique_violation (duplicate ID)
-		if strings.Contains(err.Error(), "duplicate key") {
-			writeError(w, http.StatusBadRequest, "duplicate_id", "a checkin with id "+newCheckin.ID+" already exists")
-			return
-		}
 		writeError(w, http.StatusInternalServerError, "db_error", "failed to create checkin")
 		return
 	}
@@ -220,19 +215,25 @@ func CreateCheckin(w http.ResponseWriter, r *http.Request) {
 
 // ---- PATCH /checkins/{id} ----
 func PatchCheckin(w http.ResponseWriter, r *http.Request) {
-	id := mux.Vars(r)["id"]
+	idStr := mux.Vars(r)["id"]
+
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", "id must be a number")
+		return
+	}
 
 	// Check the record exists first
 	var existing Checkin
 	var trackID int
-	err := DB.QueryRow(`
+	err = DB.QueryRow(`
 		SELECT c.id, c.learner_name, t.name, t.id, c.status, c.submitted_at
 		FROM checkins c JOIN tracks t ON c.track_id = t.id
 		WHERE c.id = $1`, id).
 		Scan(&existing.ID, &existing.LearnerName, &existing.Track, &trackID,
 			&existing.Status, &existing.SubmittedAt)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "no checkin found with id "+id)
+		writeError(w, http.StatusNotFound, "not_found", fmt.Sprintf("no checkin found with id %d", id))
 		return
 	}
 
@@ -252,7 +253,6 @@ func PatchCheckin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		existing.Track = patch.Track
-		// Re-resolve the track_id
 		DB.QueryRow(`SELECT id FROM tracks WHERE name = $1`, existing.Track).Scan(&trackID)
 	}
 	if strings.TrimSpace(patch.Status) != "" {
@@ -285,7 +285,13 @@ func PatchCheckin(w http.ResponseWriter, r *http.Request) {
 
 // ---- DELETE /checkins/{id} ----
 func DeleteCheckin(w http.ResponseWriter, r *http.Request) {
-	id := mux.Vars(r)["id"]
+	idStr := mux.Vars(r)["id"]
+
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", "id must be a number")
+		return
+	}
 
 	result, err := DB.Exec(`DELETE FROM checkins WHERE id = $1`, id)
 	if err != nil {
@@ -295,7 +301,7 @@ func DeleteCheckin(w http.ResponseWriter, r *http.Request) {
 
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
-		writeError(w, http.StatusNotFound, "not_found", "no checkin found with id "+id)
+		writeError(w, http.StatusNotFound, "not_found", fmt.Sprintf("no checkin found with id %d", id))
 		return
 	}
 

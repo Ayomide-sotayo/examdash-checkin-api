@@ -10,9 +10,9 @@ CREATE TABLE IF NOT EXISTS tracks (
 );
 
 -- Table 2: checkins (main table — references tracks)
--- Each checkin belongs to one track via foreign key
+-- id is now SERIAL so it auto-increments — callers never pass an id
 CREATE TABLE IF NOT EXISTS checkins (
-    id           TEXT PRIMARY KEY,
+    id           SERIAL      PRIMARY KEY,
     learner_name TEXT        NOT NULL,
     track_id     INTEGER     NOT NULL REFERENCES tracks(id),
     status       TEXT        NOT NULL CHECK (status IN ('pending', 'submitted', 'reviewed')),
