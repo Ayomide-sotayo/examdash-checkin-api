@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // ---- Helper: write a JSON error response ----
@@ -21,7 +23,7 @@ func writeError(w http.ResponseWriter, statusCode int, errType string, message s
 	})
 }
 
-// ---- Valid enum maps (used in validation + query checks) ----
+// ---- Valid enum maps ----
 var validTracks = map[string]bool{
 	"Backend": true, "Frontend": true,
 	"Product Design": true, "Product Management": true, "Growth": true,
@@ -47,9 +49,117 @@ func validateCheckin(c Checkin) string {
 	return ""
 }
 
+// ---- POST /auth/signup ----
+func Signup(w http.ResponseWriter, r *http.Request) {
+	var input User
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "request body must be valid JSON")
+		return
+	}
+
+	if strings.TrimSpace(input.Email) == "" {
+		writeError(w, http.StatusBadRequest, "validation_error", "email is required")
+		return
+	}
+	if strings.TrimSpace(input.Password) == "" {
+		writeError(w, http.StatusBadRequest, "validation_error", "password is required")
+		return
+	}
+
+	// Hash the password before saving
+	hashed, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", "failed to hash password")
+		return
+	}
+
+	var userID int
+	// Default to learner if no role specified
+role := input.Role
+if role == "" {
+    role = "learner"
+}
+if role != "learner" && role != "reviewer" {
+    writeError(w, http.StatusBadRequest, "validation_error", "role must be either learner or reviewer")
+    return
+}
+
+err = DB.QueryRow(`
+    INSERT INTO users (email, password, role)
+    VALUES ($1, $2, $3)
+    RETURNING id`,
+    input.Email, string(hashed), role).Scan(&userID)
+
+	if err != nil {
+		if strings.Contains(err.Error(), "duplicate key") {
+			writeError(w, http.StatusBadRequest, "duplicate_email", "a user with that email already exists")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "db_error", "failed to create user")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+json.NewEncoder(w).Encode(map[string]interface{}{
+    "id":    userID,
+    "email": input.Email,
+    "role":  role,
+})
+}
+
+// ---- POST /auth/login ----
+func Login(w http.ResponseWriter, r *http.Request) {
+	var input User
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "request body must be valid JSON")
+		return
+	}
+
+	// Find the user by email
+	var user User
+	err := DB.QueryRow(`
+		SELECT id, email, password, role FROM users WHERE email = $1`,
+		input.Email).Scan(&user.ID, &user.Email, &user.Password, &user.Role)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "invalid email or password")
+		return
+	}
+
+	// Compare hashed password
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Password)); err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "invalid email or password")
+		return
+	}
+
+	// Generate JWT token — expires in 24 hours
+	claims := &Claims{
+		UserID: user.ID,
+		Email:  user.Email,
+		Role:   user.Role,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+		},
+	}
+	tokenStr, err := generateToken(claims)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", "failed to generate token")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"token": tokenStr,
+		"role":  user.Role,
+	})
+}
+
 // ---- GET /checkins ----
-// Supports: ?track=Backend  ?status=pending  ?sort=submitted_at  ?page=1&limit=5
+// Learners see only their own checkins
+// Reviewers see all checkins
 func GetCheckins(w http.ResponseWriter, r *http.Request) {
+	claims := getClaimsFromContext(r)
+
 	trackFilter  := r.URL.Query().Get("track")
 	statusFilter := r.URL.Query().Get("status")
 	sortParam    := r.URL.Query().Get("sort")
@@ -84,15 +194,21 @@ func GetCheckins(w http.ResponseWriter, r *http.Request) {
 	}
 	offset := (page - 1) * limit
 
-	// Build the SQL query dynamically based on filters
 	query := `
-		SELECT c.id, c.learner_name, t.name AS track, c.status,
+		SELECT c.id, c.user_id, c.learner_name, t.name AS track, c.status,
 		       c.submitted_at, c.created_at, c.updated_at
 		FROM checkins c
 		JOIN tracks t ON c.track_id = t.id
 		WHERE 1=1`
 	args := []interface{}{}
 	argIdx := 1
+
+	// Ownership rule — learners only see their own checkins
+	if claims.Role == "learner" {
+		query += fmt.Sprintf(" AND c.user_id = $%d", argIdx)
+		args = append(args, claims.UserID)
+		argIdx++
+	}
 
 	if trackFilter != "" {
 		query += fmt.Sprintf(" AND t.name = $%d", argIdx)
@@ -105,14 +221,12 @@ func GetCheckins(w http.ResponseWriter, r *http.Request) {
 		argIdx++
 	}
 
-	// Sort
 	if sortParam == "submitted_at" {
 		query += " ORDER BY c.submitted_at ASC"
 	} else {
 		query += " ORDER BY c.created_at DESC"
 	}
 
-	// Pagination
 	query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
 	args = append(args, limit, offset)
 
@@ -126,7 +240,7 @@ func GetCheckins(w http.ResponseWriter, r *http.Request) {
 	result := []Checkin{}
 	for rows.Next() {
 		var c Checkin
-		if err := rows.Scan(&c.ID, &c.LearnerName, &c.Track, &c.Status,
+		if err := rows.Scan(&c.ID, &c.UserID, &c.LearnerName, &c.Track, &c.Status,
 			&c.SubmittedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "db_error", "failed to read checkins")
 			return
@@ -140,9 +254,9 @@ func GetCheckins(w http.ResponseWriter, r *http.Request) {
 
 // ---- GET /checkins/{id} ----
 func GetCheckinByID(w http.ResponseWriter, r *http.Request) {
+	claims := getClaimsFromContext(r)
 	idStr := mux.Vars(r)["id"]
 
-	// id must be a valid integer now
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_id", "id must be a number")
@@ -151,16 +265,22 @@ func GetCheckinByID(w http.ResponseWriter, r *http.Request) {
 
 	var c Checkin
 	err = DB.QueryRow(`
-		SELECT c.id, c.learner_name, t.name, c.status,
+		SELECT c.id, c.user_id, c.learner_name, t.name, c.status,
 		       c.submitted_at, c.created_at, c.updated_at
 		FROM checkins c
 		JOIN tracks t ON c.track_id = t.id
 		WHERE c.id = $1`, id).
-		Scan(&c.ID, &c.LearnerName, &c.Track, &c.Status,
+		Scan(&c.ID, &c.UserID, &c.LearnerName, &c.Track, &c.Status,
 			&c.SubmittedAt, &c.CreatedAt, &c.UpdatedAt)
 
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", fmt.Sprintf("no checkin found with id %d", id))
+		return
+	}
+
+	// Ownership rule — learner can only view their own checkin
+	if claims.Role == "learner" && c.UserID != claims.UserID {
+		writeError(w, http.StatusForbidden, "forbidden", "you do not have access to this checkin")
 		return
 	}
 
@@ -169,8 +289,9 @@ func GetCheckinByID(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- POST /checkins ----
-// Caller does NOT send an id — Postgres generates it automatically
 func CreateCheckin(w http.ResponseWriter, r *http.Request) {
+	claims := getClaimsFromContext(r)
+
 	var newCheckin Checkin
 	if err := json.NewDecoder(r.Body).Decode(&newCheckin); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_body", "request body must be valid JSON")
@@ -182,7 +303,6 @@ func CreateCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Look up the track_id from the tracks table
 	var trackID int
 	err := DB.QueryRow(`SELECT id FROM tracks WHERE name = $1`, newCheckin.Track).Scan(&trackID)
 	if err != nil {
@@ -192,12 +312,12 @@ func CreateCheckin(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	// Use RETURNING id to get the auto-generated id back
+	// Always assign the checkin to the logged-in user
 	err = DB.QueryRow(`
-		INSERT INTO checkins (learner_name, track_id, status, submitted_at, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO checkins (user_id, learner_name, track_id, status, submitted_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id`,
-		newCheckin.LearnerName, trackID,
+		claims.UserID, newCheckin.LearnerName, trackID,
 		newCheckin.Status, newCheckin.SubmittedAt, now, now).Scan(&newCheckin.ID)
 
 	if err != nil {
@@ -205,6 +325,7 @@ func CreateCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	newCheckin.UserID    = claims.UserID
 	newCheckin.CreatedAt = now
 	newCheckin.UpdatedAt = now
 
@@ -215,6 +336,7 @@ func CreateCheckin(w http.ResponseWriter, r *http.Request) {
 
 // ---- PATCH /checkins/{id} ----
 func PatchCheckin(w http.ResponseWriter, r *http.Request) {
+	claims := getClaimsFromContext(r)
 	idStr := mux.Vars(r)["id"]
 
 	id, err := strconv.Atoi(idStr)
@@ -223,17 +345,22 @@ func PatchCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check the record exists first
 	var existing Checkin
 	var trackID int
 	err = DB.QueryRow(`
-		SELECT c.id, c.learner_name, t.name, t.id, c.status, c.submitted_at
+		SELECT c.id, c.user_id, c.learner_name, t.name, t.id, c.status, c.submitted_at
 		FROM checkins c JOIN tracks t ON c.track_id = t.id
 		WHERE c.id = $1`, id).
-		Scan(&existing.ID, &existing.LearnerName, &existing.Track, &trackID,
-			&existing.Status, &existing.SubmittedAt)
+		Scan(&existing.ID, &existing.UserID, &existing.LearnerName,
+			&existing.Track, &trackID, &existing.Status, &existing.SubmittedAt)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", fmt.Sprintf("no checkin found with id %d", id))
+		return
+	}
+
+	// Ownership rule — learner can only update their own checkin
+	if claims.Role == "learner" && existing.UserID != claims.UserID {
+		writeError(w, http.StatusForbidden, "forbidden", "you do not have access to this checkin")
 		return
 	}
 
@@ -243,7 +370,6 @@ func PatchCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Merge: only overwrite fields that were sent
 	if strings.TrimSpace(patch.LearnerName) != "" {
 		existing.LearnerName = patch.LearnerName
 	}
@@ -285,6 +411,7 @@ func PatchCheckin(w http.ResponseWriter, r *http.Request) {
 
 // ---- DELETE /checkins/{id} ----
 func DeleteCheckin(w http.ResponseWriter, r *http.Request) {
+	claims := getClaimsFromContext(r)
 	idStr := mux.Vars(r)["id"]
 
 	id, err := strconv.Atoi(idStr)
@@ -293,15 +420,23 @@ func DeleteCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := DB.Exec(`DELETE FROM checkins WHERE id = $1`, id)
+	// Check it exists first
+	var ownerID int
+	err = DB.QueryRow(`SELECT user_id FROM checkins WHERE id = $1`, id).Scan(&ownerID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "db_error", "failed to delete checkin")
+		writeError(w, http.StatusNotFound, "not_found", fmt.Sprintf("no checkin found with id %d", id))
 		return
 	}
 
-	rowsAffected, _ := result.RowsAffected()
-	if rowsAffected == 0 {
-		writeError(w, http.StatusNotFound, "not_found", fmt.Sprintf("no checkin found with id %d", id))
+	// Ownership rule — learner can only delete their own checkin
+	if claims.Role == "learner" && ownerID != claims.UserID {
+		writeError(w, http.StatusForbidden, "forbidden", "you do not have access to this checkin")
+		return
+	}
+
+	_, err = DB.Exec(`DELETE FROM checkins WHERE id = $1`, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db_error", "failed to delete checkin")
 		return
 	}
 
