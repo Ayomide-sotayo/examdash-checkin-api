@@ -1,0 +1,188 @@
+# ExamDash Check-in API — HTTP Collection
+# Week 5 | Backend Engineering | Build Prize Labs EIP
+# Base URL: https://examdash-checkin-api-1.onrender.com
+#
+# HOW TO USE:
+# 1. Run the Signup request first to create an account
+# 2. Run Login to get your token
+# 3. Copy the token value and paste it into the @token variable below
+# 4. Run any protected request
+
+@baseUrl = https://examdash-checkin-api-1.onrender.com
+@token = PASTE_YOUR_TOKEN_HERE
+
+# ============================================================
+# AUTH — PUBLIC ROUTES (no token needed)
+# ============================================================
+
+### 1. Signup — Create a new learner account
+POST {{baseUrl}}/auth/signup
+Content-Type: application/json
+
+{
+  "email": "ada@examdash.com",
+  "password": "password123",
+  "role": "learner"
+}
+
+###
+
+### 2. Signup — Create a reviewer account
+POST {{baseUrl}}/auth/signup
+Content-Type: application/json
+
+{
+  "email": "reviewer@examdash.com",
+  "password": "password123",
+  "role": "reviewer"
+}
+
+###
+
+### 3. Login — Get JWT token
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "ada@examdash.com",
+  "password": "password123"
+}
+
+###
+
+### 4. Login — Wrong password (expect 401)
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "ada@examdash.com",
+  "password": "wrongpassword"
+}
+
+###
+
+# ============================================================
+# CHECK-INS — PROTECTED ROUTES (token required)
+# ============================================================
+
+### 5. GET all check-ins (learner sees own only)
+GET {{baseUrl}}/checkins
+Authorization: Bearer {{token}}
+
+###
+
+### 6. GET check-ins filtered by track
+GET {{baseUrl}}/checkins?track=Backend
+Authorization: Bearer {{token}}
+
+###
+
+### 7. GET check-ins filtered by status
+GET {{baseUrl}}/checkins?status=pending
+Authorization: Bearer {{token}}
+
+###
+
+### 8. GET check-ins with pagination
+GET {{baseUrl}}/checkins?page=1&limit=5
+Authorization: Bearer {{token}}
+
+###
+
+### 9. GET check-ins sorted by submitted_at
+GET {{baseUrl}}/checkins?sort=submitted_at
+Authorization: Bearer {{token}}
+
+###
+
+### 10. GET single check-in by ID
+GET {{baseUrl}}/checkins/1
+Authorization: Bearer {{token}}
+
+###
+
+### 11. GET check-in that belongs to another user (expect 403)
+GET {{baseUrl}}/checkins/999
+Authorization: Bearer {{token}}
+
+###
+
+### 12. POST — Create a new check-in
+POST {{baseUrl}}/checkins
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "learner_name": "Ada Okafor",
+  "track": "Backend",
+  "status": "pending",
+  "submitted_at": "2026-05-08T10:00:00Z"
+}
+
+###
+
+### 13. POST — Missing required field (expect 400 validation error)
+POST {{baseUrl}}/checkins
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "track": "Backend",
+  "status": "pending"
+}
+
+###
+
+### 14. POST — Invalid track value (expect 400 validation error)
+POST {{baseUrl}}/checkins
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "learner_name": "Ada Okafor",
+  "track": "InvalidTrack",
+  "status": "pending",
+  "submitted_at": "2026-05-08T10:00:00Z"
+}
+
+###
+
+### 15. PATCH — Update status only
+PATCH {{baseUrl}}/checkins/1
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "status": "submitted"
+}
+
+###
+
+### 16. PATCH — Update multiple fields
+PATCH {{baseUrl}}/checkins/1
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "status": "reviewed",
+  "learner_name": "Ada O."
+}
+
+###
+
+### 17. DELETE — Delete a check-in (expect 204)
+DELETE {{baseUrl}}/checkins/1
+Authorization: Bearer {{token}}
+
+###
+
+### 18. GET with no token (expect 401)
+GET {{baseUrl}}/checkins
+
+###
+
+### 19. GET with invalid token (expect 401)
+GET {{baseUrl}}/checkins
+Authorization: Bearer invalidtoken123
+
+###

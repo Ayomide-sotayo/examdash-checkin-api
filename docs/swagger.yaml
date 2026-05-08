@@ -1,0 +1,376 @@
+basePath: /
+definitions:
+  main.Checkin:
+    properties:
+      created_at:
+        type: string
+      id:
+        type: integer
+      learner_name:
+        type: string
+      status:
+        type: string
+      submitted_at:
+        type: string
+      track:
+        type: string
+      updated_at:
+        type: string
+      user_id:
+        type: integer
+    type: object
+  main.CheckinInput:
+    properties:
+      learner_name:
+        example: Ada Okafor
+        type: string
+      status:
+        enum:
+        - pending
+        - submitted
+        - reviewed
+        example: pending
+        type: string
+      submitted_at:
+        example: "2026-05-08T10:00:00Z"
+        type: string
+      track:
+        enum:
+        - Backend
+        - Frontend
+        - Product Design
+        - Product Management
+        - Growth
+        example: Backend
+        type: string
+    type: object
+  main.ErrorResponse:
+    properties:
+      error:
+        example: validation_error
+        type: string
+      message:
+        example: learner_name is required and cannot be empty
+        type: string
+    type: object
+  main.LoginInput:
+    properties:
+      email:
+        example: ada@examdash.com
+        type: string
+      password:
+        example: password123
+        type: string
+    type: object
+  main.LoginResponse:
+    properties:
+      role:
+        example: learner
+        type: string
+      token:
+        example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        type: string
+    type: object
+  main.SignupInput:
+    properties:
+      email:
+        example: ada@examdash.com
+        type: string
+      password:
+        example: password123
+        type: string
+      role:
+        enum:
+        - learner
+        - reviewer
+        example: learner
+        type: string
+    type: object
+  main.SignupResponse:
+    properties:
+      email:
+        example: ada@examdash.com
+        type: string
+      id:
+        example: 1
+        type: integer
+      role:
+        example: learner
+        type: string
+    type: object
+host: examdash-checkin-api-1.onrender.com
+info:
+  contact:
+    name: Ayomide Sotayo
+    url: https://github.com/Ayomide-sotayo/examdash-checkin-api
+  description: An authenticated REST API for managing learner check-ins at ExamDash.
+    Supports JWT auth, ownership rules, and role-based access for learners and reviewers.
+  title: ExamDash Learner Check-in API
+  version: "5.0"
+paths:
+  /auth/login:
+    post:
+      consumes:
+      - application/json
+      description: Authenticates a user and returns a signed JWT token valid for 24
+        hours.
+      parameters:
+      - description: Login credentials
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.LoginInput'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.LoginResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+      summary: Log in and get a JWT token
+      tags:
+      - auth
+  /auth/signup:
+    post:
+      consumes:
+      - application/json
+      description: Creates a new learner or reviewer account. Role defaults to learner
+        if not provided.
+      parameters:
+      - description: Signup credentials
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.SignupInput'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/main.SignupResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+      summary: Register a new user
+      tags:
+      - auth
+  /checkins:
+    get:
+      description: Returns check-ins. Learners see only their own. Reviewers see all.
+      parameters:
+      - description: Filter by track (Backend, Frontend, Product Design, Product Management,
+          Growth)
+        in: query
+        name: track
+        type: string
+      - description: Filter by status (pending, submitted, reviewed)
+        in: query
+        name: status
+        type: string
+      - description: Sort by field (submitted_at)
+        in: query
+        name: sort
+        type: string
+      - description: 'Page number (default: 1)'
+        in: query
+        name: page
+        type: integer
+      - description: 'Results per page, max 100 (default: 10)'
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/main.Checkin'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List check-ins
+      tags:
+      - checkins
+    post:
+      consumes:
+      - application/json
+      description: Creates a check-in for the currently logged-in user. user_id is
+        set automatically from the token.
+      parameters:
+      - description: Check-in data
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.CheckinInput'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/main.Checkin'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Create a new check-in
+      tags:
+      - checkins
+  /checkins/{id}:
+    delete:
+      description: Permanently deletes a check-in. Learners can only delete their
+        own check-ins.
+      parameters:
+      - description: Check-in ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete a check-in
+      tags:
+      - checkins
+    get:
+      description: Returns one check-in by ID. Learners can only access their own
+        check-ins.
+      parameters:
+      - description: Check-in ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.Checkin'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get a single check-in
+      tags:
+      - checkins
+    patch:
+      consumes:
+      - application/json
+      description: Updates only the fields provided. Learners can only update their
+        own check-ins.
+      parameters:
+      - description: Check-in ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Fields to update (all optional)
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.CheckinInput'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.Checkin'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Partially update a check-in
+      tags:
+      - checkins
+securityDefinitions:
+  BearerAuth:
+    description: 'Enter your token in the format: Bearer {token}'
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

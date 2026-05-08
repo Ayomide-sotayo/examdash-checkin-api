@@ -49,7 +49,17 @@ func validateCheckin(c Checkin) string {
 	return ""
 }
 
-// ---- POST /auth/signup ----
+// Signup godoc
+// @Summary      Register a new user
+// @Description  Creates a new learner or reviewer account. Role defaults to learner if not provided.
+// @Tags         auth
+// @Accept       json
+// @Produce      json
+// @Param        body  body      SignupInput  true  "Signup credentials"
+// @Success      201   {object}  SignupResponse
+// @Failure      400   {object}  ErrorResponse
+// @Failure      500   {object}  ErrorResponse
+// @Router       /auth/signup [post]
 func Signup(w http.ResponseWriter, r *http.Request) {
 	var input User
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -66,7 +76,6 @@ func Signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Hash the password before saving
 	hashed, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to hash password")
@@ -74,21 +83,20 @@ func Signup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var userID int
-	// Default to learner if no role specified
-role := input.Role
-if role == "" {
-    role = "learner"
-}
-if role != "learner" && role != "reviewer" {
-    writeError(w, http.StatusBadRequest, "validation_error", "role must be either learner or reviewer")
-    return
-}
+	role := input.Role
+	if role == "" {
+		role = "learner"
+	}
+	if role != "learner" && role != "reviewer" {
+		writeError(w, http.StatusBadRequest, "validation_error", "role must be either learner or reviewer")
+		return
+	}
 
-err = DB.QueryRow(`
-    INSERT INTO users (email, password, role)
-    VALUES ($1, $2, $3)
-    RETURNING id`,
-    input.Email, string(hashed), role).Scan(&userID)
+	err = DB.QueryRow(`
+		INSERT INTO users (email, password, role)
+		VALUES ($1, $2, $3)
+		RETURNING id`,
+		input.Email, string(hashed), role).Scan(&userID)
 
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key") {
@@ -101,14 +109,24 @@ err = DB.QueryRow(`
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-json.NewEncoder(w).Encode(map[string]interface{}{
-    "id":    userID,
-    "email": input.Email,
-    "role":  role,
-})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":    userID,
+		"email": input.Email,
+		"role":  role,
+	})
 }
 
-// ---- POST /auth/login ----
+// Login godoc
+// @Summary      Log in and get a JWT token
+// @Description  Authenticates a user and returns a signed JWT token valid for 24 hours.
+// @Tags         auth
+// @Accept       json
+// @Produce      json
+// @Param        body  body      LoginInput  true  "Login credentials"
+// @Success      200   {object}  LoginResponse
+// @Failure      400   {object}  ErrorResponse
+// @Failure      401   {object}  ErrorResponse
+// @Router       /auth/login [post]
 func Login(w http.ResponseWriter, r *http.Request) {
 	var input User
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -116,7 +134,6 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Find the user by email
 	var user User
 	err := DB.QueryRow(`
 		SELECT id, email, password, role FROM users WHERE email = $1`,
@@ -126,13 +143,11 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Compare hashed password
 	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Password)); err != nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "invalid email or password")
 		return
 	}
 
-	// Generate JWT token — expires in 24 hours
 	claims := &Claims{
 		UserID: user.ID,
 		Email:  user.Email,
@@ -154,9 +169,21 @@ func Login(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ---- GET /checkins ----
-// Learners see only their own checkins
-// Reviewers see all checkins
+// GetCheckins godoc
+// @Summary      List check-ins
+// @Description  Returns check-ins. Learners see only their own. Reviewers see all.
+// @Tags         checkins
+// @Produce      json
+// @Security     BearerAuth
+// @Param        track   query     string  false  "Filter by track (Backend, Frontend, Product Design, Product Management, Growth)"
+// @Param        status  query     string  false  "Filter by status (pending, submitted, reviewed)"
+// @Param        sort    query     string  false  "Sort by field (submitted_at)"
+// @Param        page    query     int     false  "Page number (default: 1)"
+// @Param        limit   query     int     false  "Results per page, max 100 (default: 10)"
+// @Success      200     {array}   Checkin
+// @Failure      400     {object}  ErrorResponse
+// @Failure      401     {object}  ErrorResponse
+// @Router       /checkins [get]
 func GetCheckins(w http.ResponseWriter, r *http.Request) {
 	claims := getClaimsFromContext(r)
 
@@ -166,7 +193,6 @@ func GetCheckins(w http.ResponseWriter, r *http.Request) {
 	pageStr      := r.URL.Query().Get("page")
 	limitStr     := r.URL.Query().Get("limit")
 
-	// Validate filters
 	if trackFilter != "" && !validTracks[trackFilter] {
 		writeError(w, http.StatusBadRequest, "invalid_query", "track must be one of: Backend, Frontend, Product Design, Product Management, Growth")
 		return
@@ -180,7 +206,6 @@ func GetCheckins(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pagination defaults
 	page, limit := 1, 10
 	if pageStr != "" {
 		if v, err := strconv.Atoi(pageStr); err == nil && v > 0 {
@@ -203,7 +228,6 @@ func GetCheckins(w http.ResponseWriter, r *http.Request) {
 	args := []interface{}{}
 	argIdx := 1
 
-	// Ownership rule — learners only see their own checkins
 	if claims.Role == "learner" {
 		query += fmt.Sprintf(" AND c.user_id = $%d", argIdx)
 		args = append(args, claims.UserID)
@@ -252,7 +276,19 @@ func GetCheckins(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
-// ---- GET /checkins/{id} ----
+// GetCheckinByID godoc
+// @Summary      Get a single check-in
+// @Description  Returns one check-in by ID. Learners can only access their own check-ins.
+// @Tags         checkins
+// @Produce      json
+// @Security     BearerAuth
+// @Param        id   path      int  true  "Check-in ID"
+// @Success      200  {object}  Checkin
+// @Failure      400  {object}  ErrorResponse
+// @Failure      401  {object}  ErrorResponse
+// @Failure      403  {object}  ErrorResponse
+// @Failure      404  {object}  ErrorResponse
+// @Router       /checkins/{id} [get]
 func GetCheckinByID(w http.ResponseWriter, r *http.Request) {
 	claims := getClaimsFromContext(r)
 	idStr := mux.Vars(r)["id"]
@@ -278,7 +314,6 @@ func GetCheckinByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ownership rule — learner can only view their own checkin
 	if claims.Role == "learner" && c.UserID != claims.UserID {
 		writeError(w, http.StatusForbidden, "forbidden", "you do not have access to this checkin")
 		return
@@ -288,7 +323,18 @@ func GetCheckinByID(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(c)
 }
 
-// ---- POST /checkins ----
+// CreateCheckin godoc
+// @Summary      Create a new check-in
+// @Description  Creates a check-in for the currently logged-in user. user_id is set automatically from the token.
+// @Tags         checkins
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        body  body      CheckinInput  true  "Check-in data"
+// @Success      201   {object}  Checkin
+// @Failure      400   {object}  ErrorResponse
+// @Failure      401   {object}  ErrorResponse
+// @Router       /checkins [post]
 func CreateCheckin(w http.ResponseWriter, r *http.Request) {
 	claims := getClaimsFromContext(r)
 
@@ -312,7 +358,6 @@ func CreateCheckin(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	// Always assign the checkin to the logged-in user
 	err = DB.QueryRow(`
 		INSERT INTO checkins (user_id, learner_name, track_id, status, submitted_at, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -334,7 +379,21 @@ func CreateCheckin(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(newCheckin)
 }
 
-// ---- PATCH /checkins/{id} ----
+// PatchCheckin godoc
+// @Summary      Partially update a check-in
+// @Description  Updates only the fields provided. Learners can only update their own check-ins.
+// @Tags         checkins
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        id    path      int           true  "Check-in ID"
+// @Param        body  body      CheckinInput  true  "Fields to update (all optional)"
+// @Success      200   {object}  Checkin
+// @Failure      400   {object}  ErrorResponse
+// @Failure      401   {object}  ErrorResponse
+// @Failure      403   {object}  ErrorResponse
+// @Failure      404   {object}  ErrorResponse
+// @Router       /checkins/{id} [patch]
 func PatchCheckin(w http.ResponseWriter, r *http.Request) {
 	claims := getClaimsFromContext(r)
 	idStr := mux.Vars(r)["id"]
@@ -358,7 +417,6 @@ func PatchCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ownership rule — learner can only update their own checkin
 	if claims.Role == "learner" && existing.UserID != claims.UserID {
 		writeError(w, http.StatusForbidden, "forbidden", "you do not have access to this checkin")
 		return
@@ -409,7 +467,19 @@ func PatchCheckin(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(existing)
 }
 
-// ---- DELETE /checkins/{id} ----
+// DeleteCheckin godoc
+// @Summary      Delete a check-in
+// @Description  Permanently deletes a check-in. Learners can only delete their own check-ins.
+// @Tags         checkins
+// @Produce      json
+// @Security     BearerAuth
+// @Param        id   path  int  true  "Check-in ID"
+// @Success      204
+// @Failure      400  {object}  ErrorResponse
+// @Failure      401  {object}  ErrorResponse
+// @Failure      403  {object}  ErrorResponse
+// @Failure      404  {object}  ErrorResponse
+// @Router       /checkins/{id} [delete]
 func DeleteCheckin(w http.ResponseWriter, r *http.Request) {
 	claims := getClaimsFromContext(r)
 	idStr := mux.Vars(r)["id"]
@@ -420,7 +490,6 @@ func DeleteCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check it exists first
 	var ownerID int
 	err = DB.QueryRow(`SELECT user_id FROM checkins WHERE id = $1`, id).Scan(&ownerID)
 	if err != nil {
@@ -428,7 +497,6 @@ func DeleteCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ownership rule — learner can only delete their own checkin
 	if claims.Role == "learner" && ownerID != claims.UserID {
 		writeError(w, http.StatusForbidden, "forbidden", "you do not have access to this checkin")
 		return

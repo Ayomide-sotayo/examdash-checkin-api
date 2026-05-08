@@ -1,6 +1,6 @@
 -- seed.sql
--- ExamDash Learner Check-in API v3
--- Run AFTER schema.sql to populate sample data
+-- ExamDash Learner Check-in API v5
+-- Run AFTER schema.sql to populate sample data for frontend testing
 
 -- Seed the tracks lookup table
 INSERT INTO tracks (name) VALUES
@@ -11,13 +11,37 @@ INSERT INTO tracks (name) VALUES
     ('Growth')
 ON CONFLICT (name) DO NOTHING;
 
--- Seed checkins — no id column, SERIAL handles it automatically
-INSERT INTO checkins (learner_name, track_id, status, submitted_at) VALUES
-    ('Ada Okafor',    1, 'submitted', '2026-04-14T09:00:00Z'),
-    ('Emeka Nwosu',   2, 'pending',   '2026-04-15T10:30:00Z'),
-    ('Zara Ahmed',    3, 'reviewed',  '2026-04-15T11:00:00Z'),
-    ('Tolu Balogun',  1, 'pending',   '2026-04-16T08:00:00Z'),
-    ('Chisom Eze',    4, 'submitted', '2026-04-16T09:15:00Z'),
-    ('Fatima Musa',   5, 'reviewed',  '2026-04-16T10:00:00Z'),
-    ('David Osei',    2, 'pending',   '2026-04-17T07:45:00Z'),
-    ('Ngozi Adeyemi', 1, 'reviewed',  '2026-04-17T09:30:00Z');
+-- Seed users (passwords are bcrypt hashes of 'password123')
+INSERT INTO users (email, password, role) VALUES
+    ('ada@examdash.com',    '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy', 'learner'),
+    ('emeka@examdash.com',  '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy', 'learner'),
+    ('reviewer@examdash.com','$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy', 'reviewer')
+ON CONFLICT (email) DO NOTHING;
+
+-- Seed check-ins linked to seeded users
+-- Ada (learner 1) check-ins
+INSERT INTO checkins (user_id, learner_name, track_id, status, submitted_at, created_at, updated_at)
+SELECT u.id, 'Ada Okafor', t.id, 'submitted', '2026-04-14T09:00:00Z', NOW(), NOW()
+FROM users u, tracks t WHERE u.email = 'ada@examdash.com' AND t.name = 'Backend';
+
+INSERT INTO checkins (user_id, learner_name, track_id, status, submitted_at, created_at, updated_at)
+SELECT u.id, 'Ada Okafor', t.id, 'reviewed', '2026-04-21T09:00:00Z', NOW(), NOW()
+FROM users u, tracks t WHERE u.email = 'ada@examdash.com' AND t.name = 'Backend';
+
+INSERT INTO checkins (user_id, learner_name, track_id, status, submitted_at, created_at, updated_at)
+SELECT u.id, 'Ada Okafor', t.id, 'pending', '2026-04-28T09:00:00Z', NOW(), NOW()
+FROM users u, tracks t WHERE u.email = 'ada@examdash.com' AND t.name = 'Backend';
+
+-- Emeka (learner 2) check-ins
+INSERT INTO checkins (user_id, learner_name, track_id, status, submitted_at, created_at, updated_at)
+SELECT u.id, 'Emeka Nwosu', t.id, 'pending', '2026-04-15T10:30:00Z', NOW(), NOW()
+FROM users u, tracks t WHERE u.email = 'emeka@examdash.com' AND t.name = 'Frontend';
+
+INSERT INTO checkins (user_id, learner_name, track_id, status, submitted_at, created_at, updated_at)
+SELECT u.id, 'Emeka Nwosu', t.id, 'submitted', '2026-04-22T10:30:00Z', NOW(), NOW()
+FROM users u, tracks t WHERE u.email = 'emeka@examdash.com' AND t.name = 'Frontend';
+
+-- Login credentials for frontend testing:
+-- ada@examdash.com      / password123  (learner)
+-- emeka@examdash.com    / password123  (learner)
+-- reviewer@examdash.com / password123  (reviewer)
